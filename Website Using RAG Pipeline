@@ -1,0 +1,81 @@
+import os
+import requests
+from bs4 import BeautifulSoup
+from sentence_transformers import SentenceTransformer
+import faiss
+import openai
+
+VECTOR_DB = "path/to/vector_database"
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+CHUNK_SIZE = 512
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+vector_dimension = embedding_model.get_sentence_embedding_dimension()
+faiss_index = faiss.IndexFlatL2(vector_dimension)
+
+def crawl_and_scrape(url):
+    """Crawls and scrapes content from a URL."""
+    try:
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        content = []
+        for tag in ['p', 'h1', 'h2', 'h3', 'li']:
+            content.extend([element.get_text(strip=True) for element in soup.find_all(tag)])
+        return ' '.join(content)
+    except Exception as e:
+        print(f"Failed to scrape {url}: {e}")
+        return ""
+def chunk_text(text, chunk_size):
+    """Chunks the text into smaller pieces."""
+    words = text.split()
+    chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+    return chunks
+def embed_chunks(chunks):
+    """Generates embeddings for text chunks."""
+    return embedding_model.encode(chunks, convert_to_tensor=False)
+def store_embeddings_in_faiss(embeddings):
+    """Stores embeddings in FAISS index."""
+    faiss_index.add(embeddings)
+def ingest_websites(urls):
+    """Ingests websites, scrapes content, chunks, and stores embeddings."""
+    metadata = []
+    for url in urls:
+        print(f"Processing URL: {url}")
+        text = crawl_and_scrape(url)
+        if text:
+            chunks = chunk_text(text, CHUNK_SIZE)
+            embeddings = embed_chunks(chunks)
+            store_embeddings_in_faiss(embeddings)
+            metadata.extend([(url, chunk) for chunk in chunks])
+    return metadata
+def query_faiss_index(query, k=5):
+    """Queries FAISS index for top-k relevant chunks."""
+    query_embedding = embedding_model.encode([query])[0]
+    distances, indices = faiss_index.search(query_embedding.reshape(1, -1), k)
+    return indices
+def generate_response(query, relevant_chunks):
+    """Generates response using OpenAI's LLM API."""
+    prompt = f"Based on the following information: {relevant_chunks}, answer: {query}"
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response['choices'][0]['message']['content']
+
+if __name__ == "__main__":
+    urls = [
+        "https://example.com",
+        "https://another-example.com"
+    ]
+    metadata = ingest_websites(urls)
+    user_query = "What is the main topic discussed on the websites?"
+    relevant_indices = query_faiss_index(user_query)
+    relevant_chunks = [metadata[i] for i in relevant_indices[0]]
+    response = generate_response(user_query, relevant_chunks)
+    print("Response:", response)
+
+#The provided code sets up a RAG pipeline for crawling, scraping, embedding, and querying website content. It retrieves data from URLs, processes it into embeddings, stores them in FAISS, and queries relevant chunks for user questions. 
